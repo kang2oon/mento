@@ -1,0 +1,6 @@
+{
+  "name": "멘토-멘티 매칭 현황 관리 대시보드",
+  "description": "멘토와 멘티의 매칭 현황, 활동 정보, 인적 사항을 한눈에 파악하고 상세히 관리할 수 있는 모던한 웹 대시보드입니다. 비개발자 사용자를 위한 단일 HTML 파일 다운로드 및 코드 복사 기능도 지원합니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
