@@ -5,10 +5,10 @@ import {
 import Papa from "papaparse";
 import { initAuth, googleSignIn, logout } from "./auth";
 import { 
-  getSpreadsheetId, createSpreadsheet, fetchAllData, 
+  getSpreadsheetId, setSpreadsheetId, createSpreadsheet, fetchAllData, 
   addMentorToSheet, addMenteeToSheet, addMatchToSheet, addLogToSheet, addLogsToSheet, 
   addMentorsToSheet, addMenteesToSheet, addMatchesToSheet,
-  updateMatchInSheet, updateMentorInSheet, updateMenteeInSheet, deleteMatchFromSheet, updateLogInSheet,
+  updateMatchInSheet, updateMentorInSheet, updateMenteeInSheet, deleteMatchFromSheet, updateLogInSheet, deleteLogFromSheet,
   checkEditorAccess, MentorData, MenteeData, MatchData, ActivityLog, PlanStatusType, MatchStatusType 
 } from "./db/sheets";
 
@@ -17,6 +17,12 @@ const ROLE_KEY = 'MENTOR_MENTEE_USER_ROLE';
 export default function App() {
   const [needsAuth, setNeedsAuth] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [inputSid, setInputSid] = useState("");
+  
+  useEffect(() => {
+    const sid = getSpreadsheetId();
+    if (sid && !inputSid) setInputSid(sid);
+  }, []);
   
   const [toastMsg, setToastMsg] = useState("");
   const showToast = (msg: string) => {
@@ -106,6 +112,12 @@ export default function App() {
   const allFields = ["전체", "창업준비", "영농기술", "농촌생활", "경영관리"];
 
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlSid = urlParams.get('sid');
+    if (urlSid) {
+      setSpreadsheetId(urlSid);
+    }
+    
     const unsubscribe = initAuth(
       async (user, token) => {
         setNeedsAuth(false);
@@ -146,7 +158,7 @@ export default function App() {
       let sid = getSpreadsheetId();
       if (!sid) {
         if (isViewer) {
-          showToast("아직 생성된 구글 시트가 없습니다. 관리자가 먼저 로그인하여 생성해야 합니다.");
+          showToast("구글 시트 ID가 없습니다. 관리자가 먼저 로그인하여 생성하거나, 시트 ID를 직접 입력해주세요.");
           setNeedsAuth(true);
           return;
         }
@@ -176,6 +188,7 @@ export default function App() {
       } else {
         showToast("데이터를 불러오는 중 오류가 발생했습니다: " + e.message);
       }
+      setNeedsAuth(true);
     } finally {
       setLoading(false);
     }
@@ -187,12 +200,13 @@ export default function App() {
   }, [selectedMatchId]);
 
   const handleLogin = async () => {
+    if (inputSid.trim()) setSpreadsheetId(inputSid.trim());
     setIsLoggingIn(true);
     try {
       const result = await googleSignIn();
       if (result) {
         let isEditor = true;
-        const sid = getSpreadsheetId();
+        const sid = inputSid.trim() || getSpreadsheetId();
         if (sid) {
           isEditor = await checkEditorAccess(sid);
         }
@@ -209,15 +223,24 @@ export default function App() {
           loadDatabase(false);
         }
       }
-    } catch (err) {
-      console.error(err);
-      showToast("로그인 실패");
+    } catch (err: any) {
+      console.error("Login error:", err);
+      const errCode = err?.code || '';
+      const errMsg = err?.message || String(err);
+      if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain')) {
+        showToast("퍼블리싱된 도메인에서 관리자 로그인을 하려면 Firebase 콘솔(console.firebase.google.com) > Authentication > 설정 > 승인된 도메인에 현재 URL의 도메인을 추가해주세요.");
+      } else if (errCode === 'auth/popup-closed-by-user' || errMsg.includes('popup-closed-by-user')) {
+        showToast("오류: 로그인 팝업이 닫혔습니다. 팝업 차단을 해제하고 브라우저 새 탭에서 열어주세요.");
+      } else {
+        showToast(`로그인 실패: ${errCode || errMsg}`);
+      }
     } finally {
       setIsLoggingIn(false);
     }
   };
   
   const handleViewerEnter = () => {
+    if (inputSid.trim()) setSpreadsheetId(inputSid.trim());
     setNeedsAuth(false);
     setUserRole('viewer');
     localStorage.setItem(ROLE_KEY, 'viewer');
@@ -256,9 +279,17 @@ export default function App() {
         localStorage.setItem(ROLE_KEY, 'admin');
         loadDatabase(false);
       }
-    } catch (err) {
-      console.error(err);
-      showToast("로그인에 실패했습니다.");
+    } catch (err: any) {
+      console.error("Login error:", err);
+      const errCode = err?.code || '';
+      const errMsg = err?.message || String(err);
+      if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain')) {
+        showToast("퍼블리싱된 도메인에서 관리자 로그인을 하려면 Firebase 콘솔(console.firebase.google.com) > Authentication > 설정 > 승인된 도메인에 현재 URL의 도메인을 추가해주세요.");
+      } else if (errCode === 'auth/popup-closed-by-user' || errMsg.includes('popup-closed-by-user')) {
+        showToast("오류: 로그인 팝업이 닫혔습니다. 팝업 차단을 해제하고 브라우저 새 탭에서 열어주세요.");
+      } else {
+        showToast(`로그인 실패: ${errCode || errMsg}`);
+      }
     } finally {
       setIsLoggingIn(false);
     }
@@ -298,6 +329,7 @@ export default function App() {
           const newMentors: MentorData[] = [];
           const newMentees: MenteeData[] = [];
           const newMatches: MatchData[] = [];
+          const updatedMatchesMap = new Map<string, MatchData>();
           
           let mIdCounter = Date.now();
           
@@ -338,18 +370,30 @@ export default function App() {
               }
             }
             
-            const allMentorMatches = [...matches, ...newMatches].filter(m => m.mentorId === mentor!.id);
-            const mentorMentees = new Set(allMentorMatches.map(m => m.menteeId));
-            mentorMentees.add(mentee.id);
+            const newBaseCount = isNaN(parseInt(baseStr)) ? 5 : parseInt(baseStr);
+            const newExtraCount = isNaN(parseInt(extraStr)) ? 3 : parseInt(extraStr);
+
+            const existingMatch = [...matches, ...newMatches].find(m => m.mentorId === mentor!.id && m.menteeId === mentee!.id && m.field === field);
             
-            const matchExists = [...matches, ...newMatches].some(m => m.mentorId === mentor!.id && m.menteeId === mentee!.id && m.field === field);
-            if (!matchExists) {
+            if (!existingMatch) {
               const newMatch: MatchData = {
                 id: `T_${mIdCounter++}`, mentorId: mentor.id, menteeId: mentee.id, field,
-                baseCount: isNaN(parseInt(baseStr)) ? 5 : parseInt(baseStr), extraCount: isNaN(parseInt(extraStr)) ? 3 : parseInt(extraStr),
+                baseCount: newBaseCount, extraCount: newExtraCount,
                 planStatus: "미작성", status: "대기"
               };
               newMatches.push(newMatch);
+            } else {
+              if (existingMatch.baseCount !== newBaseCount || existingMatch.extraCount !== newExtraCount) {
+                if (existingMatch.id.startsWith("T_")) {
+                  existingMatch.baseCount = newBaseCount;
+                  existingMatch.extraCount = newExtraCount;
+                } else {
+                  const updated = updatedMatchesMap.get(existingMatch.id) || { ...existingMatch };
+                  updated.baseCount = newBaseCount;
+                  updated.extraCount = newExtraCount;
+                  updatedMatchesMap.set(existingMatch.id, updated);
+                }
+              }
             }
           }
           
@@ -357,11 +401,32 @@ export default function App() {
           await addMenteesToSheet(sid, newMentees);
           await addMatchesToSheet(sid, newMatches);
           
+          let matchesUpdatedCount = 0;
+          if (updatedMatchesMap.size > 0) {
+            for (const [mId, updatedData] of updatedMatchesMap.entries()) {
+              const mIndex = matches.findIndex(m => m.id === mId);
+              if (mIndex !== -1) {
+                await updateMatchInSheet(sid, mIndex, updatedData);
+                matchesUpdatedCount++;
+              }
+            }
+          }
+          
           if (newMentors.length > 0) setMentors(prev => [...prev, ...newMentors]);
           if (newMentees.length > 0) setMentees(prev => [...prev, ...newMentees]);
-          if (newMatches.length > 0) setMatches(prev => [...prev, ...newMatches]);
           
-          showToast(`업로드 완료! (멘토 ${newMentors.length}명, 멘티 ${newMentees.length}명, 매칭 ${newMatches.length}건 추가됨)`);
+          if (newMatches.length > 0 || updatedMatchesMap.size > 0) {
+            setMatches(prev => {
+              let updated = [...prev];
+              for (const [mId, uData] of updatedMatchesMap.entries()) {
+                const idx = updated.findIndex(m => m.id === mId);
+                if (idx !== -1) updated[idx] = uData;
+              }
+              return [...updated, ...newMatches];
+            });
+          }
+          
+          showToast(`업로드 완료! (멘토 ${newMentors.length}명, 멘티 ${newMentees.length}명, 매칭 신규 ${newMatches.length}건, 매칭 수정 ${matchesUpdatedCount}건)`);
         } catch (err: any) {
           console.error(err);
           showToast("일괄 업로드 실패: " + (err.message || String(err)));
@@ -423,6 +488,7 @@ export default function App() {
         try {
           const rows = results.data as any[];
           const newLogs: ActivityLog[] = [];
+          const updatedLogsMap = new Map<string, ActivityLog>();
           
           let logIdCounter = Date.now();
           
@@ -446,23 +512,74 @@ export default function App() {
             }
 
             for (const mId of targetMatchIds) {
-              newLogs.push({
-                id: `ACT-${logIdCounter++}`, matchId: mId, plannedDate, actualDate,
-                startTime, endTime, place, status, inspected, inspectorName, description, sessionNum
-              });
+              const existingLog = [...activities, ...newLogs].find(a => 
+                a.matchId === mId && 
+                ( (sessionNum && a.sessionNum === sessionNum) || 
+                  (!sessionNum && a.plannedDate === plannedDate && a.startTime === startTime) )
+              );
+
+              if (!existingLog) {
+                newLogs.push({
+                  id: `ACT-${logIdCounter++}`, matchId: mId, plannedDate, actualDate,
+                  startTime, endTime, place, status, inspected, inspectorName, description, sessionNum
+                });
+              } else {
+                const isChanged = existingLog.actualDate !== actualDate ||
+                                  existingLog.endTime !== endTime ||
+                                  existingLog.place !== place ||
+                                  existingLog.status !== status ||
+                                  existingLog.inspected !== inspected ||
+                                  existingLog.inspectorName !== inspectorName ||
+                                  existingLog.description !== description;
+
+                if (isChanged) {
+                  if (existingLog.id.startsWith("ACT-")) {
+                    Object.assign(existingLog, { actualDate, endTime, place, status, inspected, inspectorName, description, sessionNum });
+                  } else {
+                    const originalLog = activities.find(a => a.id === existingLog.id);
+                    if (originalLog) {
+                      const updated = updatedLogsMap.get(existingLog.id) || { ...originalLog };
+                      Object.assign(updated, { actualDate, endTime, place, status, inspected, inspectorName, description, sessionNum });
+                      updatedLogsMap.set(existingLog.id, updated);
+                    }
+                  }
+                }
+              }
             }
           }
 
-          if (newLogs.length === 0) {
-             showToast("업로드할 유효한 수행일지 데이터가 없습니다. (예정일, 장소, 활동내용 필수)");
+          if (newLogs.length === 0 && updatedLogsMap.size === 0) {
+             showToast("업로드할 유효한 수행일지 데이터가 없거나 변경된 사항이 없습니다.");
              setLoading(false);
              e.target.value = '';
              return;
           }
           
-          await addLogsToSheet(sid, newLogs);
-          setActivities(prev => [...prev, ...newLogs]);
-          showToast(`총 ${rows.length}건의 일지(매칭기준 ${newLogs.length}건)가 추가되었습니다.`);
+          if (newLogs.length > 0) {
+            await addLogsToSheet(sid, newLogs);
+          }
+          
+          let logsUpdatedCount = 0;
+          if (updatedLogsMap.size > 0) {
+            for (const [lId, updatedData] of updatedLogsMap.entries()) {
+              const lIndex = activities.findIndex(a => a.id === lId);
+              if (lIndex !== -1) {
+                await updateLogInSheet(sid, lIndex, updatedData);
+                logsUpdatedCount++;
+              }
+            }
+          }
+
+          setActivities(prev => {
+            let updated = [...prev];
+            for (const [lId, uData] of updatedLogsMap.entries()) {
+              const idx = updated.findIndex(a => a.id === lId);
+              if (idx !== -1) updated[idx] = uData;
+            }
+            return [...updated, ...newLogs];
+          });
+          
+          showToast(`일지 일괄처리 완료! (신규 ${newLogs.length}건, 수정 ${logsUpdatedCount}건)`);
         } catch (err: any) {
           console.error(err);
           showToast("일괄 업로드 실패: " + (err.message || String(err)));
@@ -678,6 +795,34 @@ export default function App() {
     }
   };
 
+  const deleteActivity = async (id: string) => {
+    const sid = getSpreadsheetId();
+    if (!sid) {
+      showToast("구글 시트 연동이 필요합니다.");
+      return;
+    }
+    const logIndex = activities.findIndex(a => a.id === id);
+    if (logIndex === -1) return;
+    
+    if (!window.confirm("정말 이 활동 기록을 삭제하시겠습니까?")) {
+      return;
+    }
+    
+    const originalActivities = [...activities];
+    const updatedActivities = activities.filter(a => a.id !== id);
+    setActivities(updatedActivities);
+    
+    try {
+      await deleteLogFromSheet(sid, logIndex);
+      setEditingActivityId(null);
+      setEditingActivity({});
+    } catch (e) {
+      console.error(e);
+      showToast("수행일지 삭제 중 오류가 발생했습니다.");
+      setActivities(originalActivities);
+    }
+  };
+
   const updateMatch = async (id: string, updateFn: (m: MatchData) => MatchData) => {
     const sid = getSpreadsheetId();
     if (!sid) {
@@ -770,12 +915,17 @@ export default function App() {
   const getMatchMentee = (mId: string) => mentees.find(m => m.id === mId) || { name: '알수없음', phone: '', email: '', address: '', detail: '', type: '개인', teamCode: [] as string[] };
 
   const enrichedMatches = useMemo(() => {
-    return matches.map(m => ({
-      ...m,
-      mentor: getMatchMentor(m.mentorId),
-      mentee: getMatchMentee(m.menteeId),
-      actCount: activities.filter(a => a.matchId === m.id).length
-    }));
+    return matches.map(m => {
+      const matchActivities = activities.filter(a => a.matchId === m.id);
+      return {
+        ...m,
+        mentor: getMatchMentor(m.mentorId),
+        mentee: getMatchMentee(m.menteeId),
+        actCount: matchActivities.length,
+        scheduledCount: matchActivities.filter(a => a.status === '예정').length,
+        completedCount: matchActivities.filter(a => a.status === '완료').length
+      };
+    });
   }, [matches, mentors, mentees, activities]);
 
   const planStatusCounts = useMemo(() => {
@@ -820,14 +970,26 @@ export default function App() {
               다대다 매칭 및 분야별 중복 매칭을 지원하는 통합 관리 시스템입니다.
             </p>
           </div>
-          <div className="space-y-3">
-            <button onClick={handleLogin} disabled={isLoggingIn} className="w-full relative flex items-center justify-center gap-3 px-4 py-3 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all focus:outline-none cursor-pointer">
-              {isLoggingIn ? <RefreshCw className="w-5 h-5 animate-spin text-slate-400" /> : <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5 bg-white rounded-full p-0.5" alt="google" />}
-              <span>관리자 로그인 (데이터 수정)</span>
-            </button>
-            <button onClick={handleViewerEnter} disabled={isLoggingIn} className="w-full relative flex items-center justify-center gap-3 px-4 py-3 bg-white border border-slate-300 text-slate-700 font-bold hover:bg-slate-50 transition-all focus:outline-none cursor-pointer">
-              <span>일반 사용자 입장 (조회 전용)</span>
-            </button>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">구글 시트 ID (선택)</label>
+              <input 
+                type="text" 
+                value={inputSid} 
+                onChange={(e) => setInputSid(e.target.value)} 
+                placeholder="연동할 스프레드시트 ID (URL의 d/ 뒤의 문자열)"
+                className="w-full px-3 py-2 border border-slate-300 text-sm focus:outline-none focus:border-slate-500 bg-slate-50"
+              />
+            </div>
+            <div className="space-y-2">
+              <button onClick={handleLogin} disabled={isLoggingIn} className="w-full relative flex items-center justify-center gap-3 px-4 py-3 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all focus:outline-none cursor-pointer">
+                {isLoggingIn ? <RefreshCw className="w-5 h-5 animate-spin text-slate-400" /> : <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5 bg-white rounded-full p-0.5" alt="google" />}
+                <span>관리자 로그인 (데이터 수정)</span>
+              </button>
+              <button onClick={handleViewerEnter} disabled={isLoggingIn} className="w-full relative flex items-center justify-center gap-3 px-4 py-3 bg-white border border-slate-300 text-slate-700 font-bold hover:bg-slate-50 transition-all focus:outline-none cursor-pointer">
+                <span>일반 사용자 입장 (조회 전용)</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -867,11 +1029,20 @@ export default function App() {
           <div className="flex gap-2">
             {userRole === 'admin' && (
               <button onClick={() => {
-                import('./db/sheets').then(({ clearSpreadsheetId }) => {
-                  clearSpreadsheetId();
-                  window.location.reload();
-                });
-              }} className="text-xs font-bold text-red-600 hover:text-red-700 flex items-center gap-1.5 px-3 py-1.5 border border-red-200 bg-red-50 cursor-pointer">
+                if (window.confirm("1차 확인: 정말로 구글 시트 연결을 해제하시겠습니까?")) {
+                  if (window.confirm("2차 확인: 시트 연결을 해제하면 현재 연동된 데이터를 이 앱에서 더 이상 볼 수 없습니다. 계속하시겠습니까?")) {
+                    const answer = window.prompt("3차 확인: 연결을 해제하려면 '해제'라고 정확히 입력해주세요.");
+                    if (answer === "해제") {
+                      import('./db/sheets').then(({ clearSpreadsheetId }) => {
+                        clearSpreadsheetId();
+                        window.location.reload();
+                      });
+                    } else if (answer !== null) {
+                      alert("입력이 일치하지 않아 연결 해제가 취소되었습니다.");
+                    }
+                  }
+                }
+              }} className="text-xs font-bold text-rose-600 hover:text-rose-700 flex items-center gap-1.5 px-3 py-1.5 border border-rose-200 bg-rose-50 cursor-pointer transition-colors">
                 시트 연결 해제
               </button>
             )}
@@ -893,7 +1064,13 @@ export default function App() {
         <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2 text-center">
           <p className="text-[11px] font-bold text-indigo-700 max-w-7xl mx-auto flex items-center justify-center gap-2">
             <span className="bg-indigo-600 text-white px-1.5 py-0.5 rounded-sm">안내</span>
-            일반 사용자가 로그인 없이 데이터를 조회하려면 구글 시트의 공유 설정을 '링크가 있는 모든 사용자(뷰어)'로 변경해주세요. (현재 시트 ID: {getSpreadsheetId()})
+            일반 사용자가 로그인 없이 데이터를 조회하려면 구글 시트의 공유 설정을 '링크가 있는 모든 사용자(뷰어)'로 변경해주세요.
+            <button onClick={() => {
+              const url = new URL(window.location.href);
+              url.searchParams.set('sid', getSpreadsheetId() || '');
+              navigator.clipboard.writeText(url.toString());
+              showToast("공유 링크가 복사되었습니다.");
+            }} className="ml-2 bg-indigo-200 text-indigo-900 px-2 py-0.5 rounded cursor-pointer hover:bg-indigo-300 transition-colors">공유 링크 복사</button>
           </p>
         </div>
       )}
@@ -901,7 +1078,7 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
         <div className="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
-            <h2 className="text-2xl font-extrabold text-slate-900">매칭 현황판 (Google Sheets 연동)</h2>
+            <h2 className="text-2xl font-extrabold text-slate-900">매칭 현황판</h2>
             <p className="text-xs text-slate-500 mt-1">1:3 매칭 및 다중 분야 멘토링 현황을 체계적으로 관리합니다.</p>
           </div>
           {userRole === 'admin' && (
@@ -921,25 +1098,46 @@ export default function App() {
         </div>
 
         {/* Stats */}
-        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white p-4 border border-slate-200 relative overflow-hidden">
+        <section className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
             <div className="absolute top-0 left-0 w-1 h-full bg-slate-900"></div>
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">총 매칭 건수</p>
-            <p className="text-2xl font-extrabold text-slate-900 mt-1.5 font-mono">{matches.length}<span className="text-sm font-bold text-slate-400 ml-1">건</span></p>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">총 매칭</p>
+            <p className="text-xl font-extrabold text-slate-900 mt-1 font-mono">{matches.length}</p>
           </div>
-          <div className="bg-white p-4 border border-slate-200 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-indigo-600"></div>
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">진행 중 멘토링</p>
-            <p className="text-2xl font-extrabold text-indigo-600 mt-1.5 font-mono">{matches.filter(m => m.status === '진행 중').length}<span className="text-xs text-slate-400 ml-1">진행</span></p>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">진행 중 멘토링</p>
+            <p className="text-xl font-extrabold text-indigo-600 mt-1 font-mono">{matches.filter(m => m.status === '진행 중').length}</p>
           </div>
-          <div className="bg-white p-4 border border-slate-200 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">활동 기록 수</p>
-            <p className="text-2xl font-extrabold text-slate-900 mt-1.5 font-mono">{activities.length}<span className="text-xs text-slate-400 ml-1">회</span></p>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">완료 멘토링</p>
+            <p className="text-xl font-extrabold text-emerald-600 mt-1 font-mono">{matches.filter(m => m.status === '완료').length}</p>
           </div>
-          <div className="bg-white p-4 border border-slate-200 relative overflow-hidden flex flex-col justify-center">
-            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest font-mono">등록 현황</p>
-            <div className="text-sm font-bold text-slate-700 mt-1">멘토: {mentors.length}명 / 멘티: {mentees.length}명</div>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-slate-400"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">종료 멘토링</p>
+            <p className="text-xl font-extrabold text-slate-600 mt-1 font-mono">{matches.filter(m => m.status === '종료').length}</p>
+          </div>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-amber-400"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">예정 활동</p>
+            <p className="text-xl font-extrabold text-amber-600 mt-1 font-mono">{activities.filter(a => a.status === '예정').length}</p>
+          </div>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">완료 활동</p>
+            <p className="text-xl font-extrabold text-blue-600 mt-1 font-mono">{activities.filter(a => a.status === '완료').length}</p>
+          </div>
+          <div className="bg-white p-3 border border-slate-200 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-rose-500"></div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono truncate">현장점검</p>
+            <p className="text-xl font-extrabold text-rose-600 mt-1 font-mono">{activities.filter(a => a.inspected).length}</p>
+          </div>
+          <div className="bg-white p-3 border border-slate-200 flex flex-col justify-center relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-slate-300"></div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest font-mono truncate">등록 현황</p>
+            <div className="text-sm font-bold text-slate-700 mt-1">멘토: {mentors.length}명<br/>멘티: {mentees.length}명</div>
           </div>
         </section>
 
@@ -1000,7 +1198,7 @@ export default function App() {
                     <div className="text-indigo-700">멘토: {match.mentor.name}</div>
                     <div className="text-emerald-700">멘티: {match.mentee.name} {match.mentee.type === '팀' && <span className="text-xs bg-emerald-100 text-emerald-800 px-1 py-0.5 ml-1">팀</span>}</div>
                   </div>
-                  <div className="mt-2 text-xs text-[#969696] font-mono">기본: {match.baseCount}회 | 추가: {match.extraCount}회 | 진행: {match.actCount}회</div>
+                  <div className="mt-2 text-xs text-[#969696] font-mono">기본: {match.baseCount}회 | 추가: {match.extraCount}회 | 예정: {match.scheduledCount}회 | 완료: {match.completedCount}회</div>
                 </div>
               ))}
               {filteredMatches.length === 0 && <div className="p-8 text-center text-sm text-slate-400">매칭 데이터가 없습니다.</div>}
@@ -1313,9 +1511,12 @@ export default function App() {
                               <label className="block text-[11px] font-bold text-slate-500 mb-1">활동 내용</label>
                               <textarea value={editingActivity.description || ''} onChange={(e) => setEditingActivity({...editingActivity, description: e.target.value})} className="w-full px-2 py-1 text-xs border border-slate-300 min-h-[60px]" />
                             </div>
-                            <div className="flex justify-end gap-2 pt-2">
-                              <button onClick={() => setEditingActivityId(null)} className="px-3 py-1 text-xs font-bold text-slate-600 border border-slate-300 bg-white hover:bg-slate-50">취소</button>
-                              <button onClick={() => updateActivity(act.id, { ...act, ...editingActivity } as ActivityLog)} className="px-3 py-1 text-xs font-bold text-white bg-indigo-600 border border-indigo-700 hover:bg-indigo-700">저장</button>
+                            <div className="flex justify-between items-center pt-2">
+                              <button onClick={() => deleteActivity(act.id)} className="px-3 py-1 text-xs font-bold text-rose-600 border border-rose-200 bg-rose-50 hover:bg-rose-100">삭제</button>
+                              <div className="flex gap-2">
+                                <button onClick={() => setEditingActivityId(null)} className="px-3 py-1 text-xs font-bold text-slate-600 border border-slate-300 bg-white hover:bg-slate-50">취소</button>
+                                <button onClick={() => updateActivity(act.id, { ...act, ...editingActivity } as ActivityLog)} className="px-3 py-1 text-xs font-bold text-white bg-indigo-600 border border-indigo-700 hover:bg-indigo-700">저장</button>
+                              </div>
                             </div>
                           </div>
                         ) : (

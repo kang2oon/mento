@@ -1,0 +1,170 @@
+import sys
+
+with open('src/App.tsx', 'r') as f:
+    content = f.read()
+
+target = """      complete: async (results) => {
+        try {
+          const rows = results.data as any[];
+          const newLogs: ActivityLog[] = [];
+          
+          let logIdCounter = Date.now();
+          
+          for (const row of rows) {
+            const sessionNumStr = row['회차']?.trim() || '';
+            const sessionNum = sessionNumStr || undefined;
+            const plannedDate = row['예정일']?.trim() || '';
+            const actualDate = row['실시일']?.trim() || '';
+            const startTime = row['시작시간']?.trim() || '';
+            const endTime = row['종료시간']?.trim() || '';
+            const place = row['장소']?.trim() || '';
+            const statusStr = row['상태']?.trim() || '';
+            const status = statusStr === '완료' ? '완료' : '예정';
+            const inspectedStr = row['현장점검(O/X)']?.trim() || '';
+            const inspected = inspectedStr.toUpperCase() === 'O';
+            const inspectorName = row['담당자명']?.trim() || '';
+            const description = row['활동내용']?.trim() || '';
+
+            if (!plannedDate || !place || !description) {
+              continue; 
+            }
+
+            for (const mId of targetMatchIds) {
+              newLogs.push({
+                id: `ACT-${logIdCounter++}`, matchId: mId, plannedDate, actualDate,
+                startTime, endTime, place, status, inspected, inspectorName, description, sessionNum
+              });
+            }
+          }
+
+          if (newLogs.length === 0) {
+             showToast("업로드할 유효한 수행일지 데이터가 없습니다. (예정일, 장소, 활동내용 필수)");
+             setLoading(false);
+             e.target.value = '';
+             return;
+          }
+          
+          await addLogsToSheet(sid, newLogs);
+          setActivities(prev => [...prev, ...newLogs]);
+          
+          showToast(`총 ${rows.length}건의 일지(매칭기준 ${newLogs.length}건)가 추가되었습니다.`);
+        } catch (err: any) {
+          console.error(err);
+          showToast("일괄 업로드 실패: " + (err.message || String(err)));
+        } finally {
+          setLoading(false);
+          e.target.value = '';
+        }
+      }"""
+
+replacement = """      complete: async (results) => {
+        try {
+          const rows = results.data as any[];
+          const newLogs: ActivityLog[] = [];
+          const updatedLogsMap = new Map<string, ActivityLog>();
+          
+          let logIdCounter = Date.now();
+          
+          for (const row of rows) {
+            const sessionNumStr = row['회차']?.trim() || '';
+            const sessionNum = sessionNumStr || undefined;
+            const plannedDate = row['예정일']?.trim() || '';
+            const actualDate = row['실시일']?.trim() || '';
+            const startTime = row['시작시간']?.trim() || '';
+            const endTime = row['종료시간']?.trim() || '';
+            const place = row['장소']?.trim() || '';
+            const statusStr = row['상태']?.trim() || '';
+            const status = statusStr === '완료' ? '완료' : '예정';
+            const inspectedStr = row['현장점검(O/X)']?.trim() || '';
+            const inspected = inspectedStr.toUpperCase() === 'O';
+            const inspectorName = row['담당자명']?.trim() || '';
+            const description = row['활동내용']?.trim() || '';
+
+            if (!plannedDate || !place || !description) {
+              continue; 
+            }
+
+            for (const mId of targetMatchIds) {
+              const existingLog = [...activities, ...newLogs].find(a => 
+                a.matchId === mId && 
+                ( (sessionNum && a.sessionNum === sessionNum) || 
+                  (!sessionNum && a.plannedDate === plannedDate && a.startTime === startTime) )
+              );
+
+              if (!existingLog) {
+                newLogs.push({
+                  id: `ACT-${logIdCounter++}`, matchId: mId, plannedDate, actualDate,
+                  startTime, endTime, place, status, inspected, inspectorName, description, sessionNum
+                });
+              } else {
+                const isChanged = existingLog.actualDate !== actualDate ||
+                                  existingLog.endTime !== endTime ||
+                                  existingLog.place !== place ||
+                                  existingLog.status !== status ||
+                                  existingLog.inspected !== inspected ||
+                                  existingLog.inspectorName !== inspectorName ||
+                                  existingLog.description !== description;
+
+                if (isChanged) {
+                  if (existingLog.id.startsWith("ACT-")) {
+                    Object.assign(existingLog, { actualDate, endTime, place, status, inspected, inspectorName, description, sessionNum });
+                  } else {
+                    const originalLog = activities.find(a => a.id === existingLog.id);
+                    if (originalLog) {
+                      const updated = updatedLogsMap.get(existingLog.id) || { ...originalLog };
+                      Object.assign(updated, { actualDate, endTime, place, status, inspected, inspectorName, description, sessionNum });
+                      updatedLogsMap.set(existingLog.id, updated);
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          if (newLogs.length === 0 && updatedLogsMap.size === 0) {
+             showToast("업로드할 유효한 수행일지 데이터가 없거나 변경된 사항이 없습니다.");
+             setLoading(false);
+             e.target.value = '';
+             return;
+          }
+          
+          if (newLogs.length > 0) {
+            await addLogsToSheet(sid, newLogs);
+          }
+          
+          let logsUpdatedCount = 0;
+          if (updatedLogsMap.size > 0) {
+            for (const [lId, updatedData] of updatedLogsMap.entries()) {
+              const lIndex = activities.findIndex(a => a.id === lId);
+              if (lIndex !== -1) {
+                await updateLogInSheet(sid, lIndex, updatedData);
+                logsUpdatedCount++;
+              }
+            }
+          }
+
+          setActivities(prev => {
+            let updated = [...prev];
+            for (const [lId, uData] of updatedLogsMap.entries()) {
+              const idx = updated.findIndex(a => a.id === lId);
+              if (idx !== -1) updated[idx] = uData;
+            }
+            return [...updated, ...newLogs];
+          });
+          
+          showToast(`일지 일괄처리 완료! (신규 ${newLogs.length}건, 수정 ${logsUpdatedCount}건)`);
+        } catch (err: any) {
+          console.error(err);
+          showToast("일괄 업로드 실패: " + (err.message || String(err)));
+        } finally {
+          setLoading(false);
+          e.target.value = '';
+        }
+      }"""
+
+if target in content:
+    with open('src/App.tsx', 'w') as f:
+        f.write(content.replace(target, replacement))
+    print("Success")
+else:
+    print("Target not found")

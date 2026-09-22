@@ -210,7 +210,38 @@ export const fetchAllData = async (spreadsheetId: string, isViewer: boolean = fa
         const text = await res.text();
         const obj = JSON.parse(text.substring(47, text.length - 2));
         if (!obj.table || !obj.table.rows) return [];
-        return obj.table.rows.map((r: any) => r.c.map((cell: any) => cell ? (cell.v === null || cell.v === undefined ? '' : String(cell.v)) : ''));
+        return obj.table.rows.map((r: any) => {
+          const cols = [];
+          for (let i = 0; i < 15; i++) {
+             const cell = r.c && r.c[i];
+             if (!cell) {
+               cols.push('');
+               continue;
+             }
+             let val = cell.f ? String(cell.f) : (cell.v === null || cell.v === undefined ? '' : String(cell.v));
+             
+             if (val.startsWith('Date(') && val.endsWith(')')) {
+               const parts = val.substring(5, val.length - 1).split(',').map(Number);
+               if (parts.length >= 3) {
+                 const [y, m, d, h, mn, s] = parts;
+                 if (i === 11) { // sessionNum
+                    val = `${Number(m)+1}-${d}`;
+                 } else if (y === 1899 && m === 11 && d === 30) {
+                    const hh = h !== undefined ? String(h).padStart(2, '0') : '00';
+                    const mm = mn !== undefined ? String(mn).padStart(2, '0') : '00';
+                    val = `${hh}:${mm}`;
+                 } else {
+                    const yy = y;
+                    const mm = String(Number(m) + 1).padStart(2, '0');
+                    const dd = String(d).padStart(2, '0');
+                    val = `${yy}-${mm}-${dd}`;
+                 }
+               }
+             }
+             cols.push(val);
+          }
+          return cols;
+        });
       };
       [mentorValues, menteeValues, matchValues, logValues] = await Promise.all([
         fetchSheetGviz('Mentors'),
@@ -257,22 +288,12 @@ export const fetchAllData = async (spreadsheetId: string, isViewer: boolean = fa
     planStatus: (r[6]||'미작성') as PlanStatusType, status: (r[7]||'대기') as MatchStatusType
   }));
   const logs: ActivityLog[] = logValues.map((r: any) => {
-    if (r.length <= 7) {
-      // Handle legacy format: id, matchId, date, place, status, inspected, description
-      return {
-        id: r[0]||'', matchId: r[1]||'', plannedDate: r[2]||'', actualDate: '',
-        startTime: '', endTime: '', place: r[3]||'',
-        status: (r[4] === '완료' ? '완료' : '예정'), inspected: r[5] === 'TRUE',
-        inspectorName: '', description: r[6]||''
-      };
-    }
-    // New format
     return {
       id: r[0]||'', matchId: r[1]||'', plannedDate: r[2]||'', actualDate: r[3]||'',
       startTime: r[4]||'', endTime: r[5]||'', place: r[6]||'', 
-      status: (r[7] === '완료' ? '완료' : '예정'), inspected: r[8] === 'TRUE',
+      status: (r[7] === '완료' ? '완료' : '예정'), inspected: String(r[8]).toUpperCase() === 'TRUE',
       inspectorName: r[9]||'', description: r[10]||'',
-      sessionNum: r[11] || undefined
+      sessionNum: (r[11] && r[11].match(/^\d{4}-(\d{2})-(\d{2})$/)) ? r[11].replace(/^\d{4}-0?(\d+)-0?(\d+)$/, '$1-$2') : (r[11] || undefined)
     };
   });
 
@@ -356,6 +377,33 @@ export const deleteMatchFromSheet = async (spreadsheetId: string, rowIndex: numb
   
   const sheetId = sheet.properties.sheetId;
   const sheetRowIndex = rowIndex + 1; // 0-indexed: header is index 0, first data is index 1
+
+  await req(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId: sheetId,
+              dimension: 'ROWS',
+              startIndex: sheetRowIndex,
+              endIndex: sheetRowIndex + 1
+            }
+          }
+        }
+      ]
+    })
+  });
+};
+
+export const deleteLogFromSheet = async (spreadsheetId: string, rowIndex: number) => {
+  const meta = await req(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`);
+  const sheet = meta.sheets.find((s: any) => s.properties.title === 'Activities');
+  if (!sheet) throw new Error("Activities sheet not found");
+  
+  const sheetId = sheet.properties.sheetId;
+  const sheetRowIndex = rowIndex + 1;
 
   await req(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
     method: 'POST',

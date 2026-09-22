@@ -1,8 +1,9 @@
 {
-  "apiKey": "dummy-api-key-for-build",
-  "authDomain": "dummy-auth-domain",
-  "projectId": "dummy-project-id",
-  "storageBucket": "dummy-storage-bucket",
-  "messagingSenderId": "dummy-messaging-sender-id",
-  "appId": "dummy-app-id"
+  "projectId": "project-6051ab4f-a523-4733-ae3",
+  "appId": "1:266063371155:web:cd4693977478c209bf6666",
+  "apiKey": "AIzaSyB9S9oBu_ZPee7NKXBJI0m3W3gEU0reMq0",
+  "authDomain": "project-6051ab4f-a523-4733-ae3.firebaseapp.com",
+  "storageBucket": "project-6051ab4f-a523-4733-ae3.firebasestorage.app",
+  "messagingSenderId": "266063371155",
+  "measurementId": ""
 }
